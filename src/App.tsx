@@ -18,13 +18,17 @@ export default function VoiceChat() {
   const [conversationHistory, setConversationHistory] = useState<Message[]>([]);
   const [hasApiKey, setHasApiKey] = useState(false);
   const [initError, setInitError] = useState('');
+  const [isSpeaking, setIsSpeaking] = useState(false);
   
   const engineRef = useRef<VoiceChatEngine | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const finalTranscriptRef = useRef<string>('');
   const shouldProcessRef = useRef<boolean>(false);
+  const audioQueueRef = useRef<string[]>([]);
+  const isPlayingRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Logger function - console only
+  // Logger function
   const log = (message: string, type: 'info' | 'error' | 'warn' = 'info') => {
     const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
     const logMessage = `[${timestamp}] ${type.toUpperCase()}: ${message}`;
@@ -39,7 +43,6 @@ export default function VoiceChat() {
       const engine = new VoiceChatEngine();
       engineRef.current = engine;
       
-      // Check if API key exists
       log('Checking for API key...');
       if (engine.hasApiKey()) {
         log('API key found, initializing TTS...');
@@ -73,8 +76,37 @@ export default function VoiceChat() {
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
     };
   }, []);
+
+  // Process audio queue for chunked TTS
+  const processAudioQueue = async () => {
+    if (isPlayingRef.current || audioQueueRef.current.length === 0) {
+      return;
+    }
+
+    isPlayingRef.current = true;
+    setIsSpeaking(true);
+
+    while (audioQueueRef.current.length > 0) {
+      const textChunk = audioQueueRef.current.shift();
+      if (textChunk && engineRef.current) {
+        try {
+          log(`Generating speech for chunk: "${textChunk.substring(0, 30)}..."`);
+          const wavBuffer = await engineRef.current.generateSpeech(textChunk);
+          await engineRef.current.playAudio(wavBuffer);
+        } catch (error) {
+          log(`TTS error: ${error}`, 'error');
+        }
+      }
+    }
+
+    isPlayingRef.current = false;
+    setIsSpeaking(false);
+  };
 
   // Start Listening
   const startListening = () => {
@@ -94,14 +126,13 @@ export default function VoiceChat() {
 
     log('Initializing speech recognition...');
     finalTranscriptRef.current = '';
-    shouldProcessRef.current = true; // Flag that we want to process results
+    shouldProcessRef.current = true;
     
     const recognition = engineRef.current.initializeSpeechRecognition(
       (text) => {
         log(`Recognition result: "${text.substring(0, 50)}..."`);
         setTranscript(text);
         
-        // Store final transcript
         if (text.trim()) {
           finalTranscriptRef.current = text.trim();
           log(`Updated finalTranscriptRef: "${finalTranscriptRef.current.substring(0, 50)}..."`);
@@ -121,7 +152,6 @@ export default function VoiceChat() {
         log(`shouldProcessRef: ${shouldProcessRef.current}`);
         log(`Final transcript at end: "${finalTranscriptRef.current.substring(0, 50)}..."`);
         
-        // Process if we should and have transcript
         if (shouldProcessRef.current && finalTranscriptRef.current) {
           log('Triggering handleSpeechEnd...');
           handleSpeechEnd();
@@ -154,12 +184,11 @@ export default function VoiceChat() {
     }
   };
 
-  // Stop Listening (and process)
+  // Stop Listening
   const stopListening = () => {
     log('=== STOP LISTENING CLICKED ===');
     if (recognitionRef.current) {
       log('Stopping recognition and will process transcript...');
-      // Don't set shouldProcessRef to false - we want to process when user clicks stop
       recognitionRef.current.stop();
       setIsListening(false);
     } else {
@@ -167,7 +196,7 @@ export default function VoiceChat() {
     }
   };
 
-  // Handle Speech End
+  // Handle Speech End with streaming
   const handleSpeechEnd = async () => {
     log('=== HANDLE SPEECH END CALLED ===');
     
@@ -191,34 +220,60 @@ export default function VoiceChat() {
     setIsListening(false);
     setIsProcessing(true);
     setStatus('Processing with Gemini...');
-    log('Starting AI processing...');
+    setAiResponse('');
+    log('Starting AI processing with streaming...');
+
+    abortControllerRef.current = new AbortController();
+    let wordBuffer = '';
+    let fullResponse = '';
 
     try {
-      log('Calling Gemini API...');
-      const response = await engineRef.current.callGeminiAPI(textToProcess);
-      log(`Gemini response received: "${response.substring(0, 100)}..."`);
-      setAiResponse(response);
-      
-      // Update conversation history
-      log('Updating conversation history...');
-      setConversationHistory(prev => {
-        const updated: Message[] = [...prev, 
-          { role: 'user', text: textToProcess },
-          { role: 'assistant', text: response }
-        ];
-        log(`Conversation history updated, total messages: ${updated.length}`);
-        return updated.slice(-10);
-      });
+      await engineRef.current.streamGeminiAPI(
+        textToProcess,
+        (chunk) => {
+          // On each chunk received
+          fullResponse += chunk;
+          wordBuffer += chunk;
+          setAiResponse(fullResponse);
 
-      log('Generating speech...');
-      setStatus('Generating speech...');
-      const wavBuffer = await engineRef.current.generateSpeech(response);
-      log(`Speech generated, buffer size: ${wavBuffer.byteLength} bytes`);
+          // Split into ~8-word chunks for TTS
+          const words = wordBuffer.split(' ');
+          if (words.length >= 8) {
+            const speechChunk = words.slice(0, 8).join(' ');
+            log(`Adding chunk to queue: "${speechChunk}"`);
+            audioQueueRef.current.push(speechChunk);
+            wordBuffer = words.slice(8).join(' ');
+            processAudioQueue();
+          }
+        },
+        (fullText) => {
+          // On completion
+          log(`Streaming completed. Full text: "${fullText.substring(0, 100)}..."`);
+          
+          // Push remaining words as final chunk
+          if (wordBuffer.trim()) {
+            log(`Adding final chunk to queue: "${wordBuffer.trim()}"`);
+            audioQueueRef.current.push(wordBuffer.trim());
+            processAudioQueue();
+          }
+
+          // Update conversation history
+          const history = engineRef.current?.getConversationHistory() || [];
+          setConversationHistory(history.map(msg => ({
+            role: msg.role as 'user' | 'assistant',
+            text: msg.text
+          })));
+        },
+        abortControllerRef.current.signal
+      );
+
+      log('Waiting for audio queue to complete...');
+      setStatus('Completing speech...');
       
-      log('Playing audio...');
-      setStatus('Playing response...');
-      await engineRef.current.playAudio(wavBuffer);
-      log('Audio playback completed');
+      // Wait for audio queue to finish
+      while (audioQueueRef.current.length > 0 || isPlayingRef.current) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
       
       setStatus('Ready');
       log('=== PROCESSING COMPLETE ===');
@@ -239,9 +294,11 @@ export default function VoiceChat() {
   // Clear conversation history
   const clearHistory = () => {
     log('Clearing conversation history');
+    engineRef.current?.clearHistory();
     setConversationHistory([]);
     setTranscript('');
     setAiResponse('');
+    audioQueueRef.current = [];
   };
 
   return (
@@ -289,8 +346,11 @@ export default function VoiceChat() {
           <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg mb-6">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                {isProcessing && <Loader2 size={16} className="animate-spin text-purple-600" />}
-                <span className="text-sm font-medium text-gray-700">{status}</span>
+                {(isProcessing || isSpeaking) && <Loader2 size={16} className="animate-spin text-purple-600" />}
+                <span className="text-sm font-medium text-gray-700">
+                  {status}
+                  {isSpeaking && ' 🔊'}
+                </span>
               </div>
               {conversationHistory.length > 0 && (
                 <button
