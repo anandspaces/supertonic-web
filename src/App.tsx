@@ -21,25 +21,45 @@ export default function VoiceChat() {
   
   const engineRef = useRef<VoiceChatEngine | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const finalTranscriptRef = useRef<string>('');
+  const shouldProcessRef = useRef<boolean>(false);
+
+  // Logger function - console only
+  const log = (message: string, type: 'info' | 'error' | 'warn' = 'info') => {
+    const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
+    const logMessage = `[${timestamp}] ${type.toUpperCase()}: ${message}`;
+    console.log(logMessage);
+  };
 
   // Initialize Engine
   useEffect(() => {
+    log('=== APP COMPONENT MOUNTED ===');
     const initEngine = async () => {
+      log('Creating VoiceChatEngine instance...');
       const engine = new VoiceChatEngine();
       engineRef.current = engine;
       
-      // Check if API key exists in environment
+      // Check if API key exists
+      log('Checking for API key...');
       if (engine.hasApiKey()) {
+        log('API key found, initializing TTS...');
         setHasApiKey(true);
         try {
-          await engine.initializeTTS(setStatus);
+          log('Starting TTS initialization...');
+          const ttsStatus = await engine.initializeTTS((status) => {
+            log(`TTS Status Update: ${status}`);
+            setStatus(status);
+          });
+          log(`TTS initialized successfully: ${ttsStatus}`);
           setStatus('Ready');
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          log(`TTS initialization failed: ${errorMsg}`, 'error');
           setInitError(`TTS initialization failed: ${errorMsg}`);
           setStatus('TTS initialization failed');
         }
       } else {
+        log('API key not found', 'error');
         setHasApiKey(false);
         setInitError('VITE_GEMINI_API_KEY environment variable is not set. Please add it to your .env file.');
         setStatus('Missing API key');
@@ -47,35 +67,75 @@ export default function VoiceChat() {
     };
 
     initEngine();
+
+    return () => {
+      log('Component unmounting, cleaning up...');
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
   }, []);
 
   // Start Listening
   const startListening = () => {
+    log('=== START LISTENING CLICKED ===');
+    
     if (!engineRef.current) {
+      log('Engine not initialized', 'error');
       alert('Engine not initialized');
       return;
     }
 
     if (!hasApiKey) {
+      log('API key missing, cannot start', 'error');
       alert('Gemini API key not found in environment variables. Please set VITE_GEMINI_API_KEY.');
       return;
     }
 
+    log('Initializing speech recognition...');
+    finalTranscriptRef.current = '';
+    shouldProcessRef.current = true; // Flag that we want to process results
+    
     const recognition = engineRef.current.initializeSpeechRecognition(
-      (text) => setTranscript(text),
+      (text) => {
+        log(`Recognition result: "${text.substring(0, 50)}..."`);
+        setTranscript(text);
+        
+        // Store final transcript
+        if (text.trim()) {
+          finalTranscriptRef.current = text.trim();
+          log(`Updated finalTranscriptRef: "${finalTranscriptRef.current.substring(0, 50)}..."`);
+        }
+      },
       (error) => {
-        console.error('Speech recognition error:', error);
+        log(`Speech recognition error: ${error}`, 'error');
         setStatus(`Recognition error: ${error}`);
         setIsListening(false);
+        
+        if (error === 'not-allowed') {
+          alert('Microphone access denied. Please allow microphone access.');
+        }
       },
       () => {
-        if (isListening) {
+        log('Recognition ended event triggered');
+        log(`shouldProcessRef: ${shouldProcessRef.current}`);
+        log(`Final transcript at end: "${finalTranscriptRef.current.substring(0, 50)}..."`);
+        
+        // Process if we should and have transcript
+        if (shouldProcessRef.current && finalTranscriptRef.current) {
+          log('Triggering handleSpeechEnd...');
           handleSpeechEnd();
+        } else {
+          log(`Skipping processing - shouldProcess: ${shouldProcessRef.current}, hasTranscript: ${!!finalTranscriptRef.current}`, 'warn');
+          setIsListening(false);
         }
       }
     );
 
-    if (!recognition) return;
+    if (!recognition) {
+      log('Failed to create recognition instance', 'error');
+      return;
+    }
 
     recognitionRef.current = recognition;
     setIsListening(true);
@@ -83,26 +143,46 @@ export default function VoiceChat() {
     setAiResponse('');
     setStatus('Listening...');
     
-    recognition.start();
+    log('Starting recognition...');
+    try {
+      recognition.start();
+      log('Recognition started successfully');
+    } catch (error) {
+      log(`Failed to start recognition: ${error}`, 'error');
+      setIsListening(false);
+      setStatus('Failed to start listening');
+    }
   };
 
-  // Stop Listening
+  // Stop Listening (and process)
   const stopListening = () => {
+    log('=== STOP LISTENING CLICKED ===');
     if (recognitionRef.current) {
+      log('Stopping recognition and will process transcript...');
+      // Don't set shouldProcessRef to false - we want to process when user clicks stop
       recognitionRef.current.stop();
       setIsListening(false);
+    } else {
+      log('No recognition to stop', 'warn');
     }
   };
 
   // Handle Speech End
   const handleSpeechEnd = async () => {
-    if (!transcript.trim()) {
+    log('=== HANDLE SPEECH END CALLED ===');
+    
+    const textToProcess = finalTranscriptRef.current;
+    log(`Text to process: "${textToProcess.substring(0, 100)}..."`);
+    
+    if (!textToProcess) {
+      log('No transcript available, aborting', 'warn');
       setStatus('No speech detected');
       setIsListening(false);
       return;
     }
 
     if (!engineRef.current) {
+      log('Engine not available', 'error');
       setStatus('Engine not available');
       setIsListening(false);
       return;
@@ -111,38 +191,54 @@ export default function VoiceChat() {
     setIsListening(false);
     setIsProcessing(true);
     setStatus('Processing with Gemini...');
+    log('Starting AI processing...');
 
     try {
-      const response = await engineRef.current.callGeminiAPI(transcript);
+      log('Calling Gemini API...');
+      const response = await engineRef.current.callGeminiAPI(textToProcess);
+      log(`Gemini response received: "${response.substring(0, 100)}..."`);
       setAiResponse(response);
       
-      // Keep only last 10 messages to prevent memory issues
+      // Update conversation history
+      log('Updating conversation history...');
       setConversationHistory(prev => {
         const updated: Message[] = [...prev, 
-          { role: 'user' as const, text: transcript },
-          { role: 'assistant' as const, text: response }
+          { role: 'user', text: textToProcess },
+          { role: 'assistant', text: response }
         ];
+        log(`Conversation history updated, total messages: ${updated.length}`);
         return updated.slice(-10);
       });
 
+      log('Generating speech...');
       setStatus('Generating speech...');
       const wavBuffer = await engineRef.current.generateSpeech(response);
+      log(`Speech generated, buffer size: ${wavBuffer.byteLength} bytes`);
       
+      log('Playing audio...');
       setStatus('Playing response...');
       await engineRef.current.playAudio(wavBuffer);
+      log('Audio playback completed');
       
       setStatus('Ready');
+      log('=== PROCESSING COMPLETE ===');
     } catch (error) {
-      console.error('Processing error:', error);
-      setStatus(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      log(`Processing error: ${errorMsg}`, 'error');
+      console.error('Full error:', error);
+      setStatus(`Error: ${errorMsg}`);
+      alert(`Error: ${errorMsg}`);
     } finally {
+      log('Cleaning up processing state...');
       setIsProcessing(false);
       setTranscript('');
+      finalTranscriptRef.current = '';
     }
   };
 
   // Clear conversation history
   const clearHistory = () => {
+    log('Clearing conversation history');
     setConversationHistory([]);
     setTranscript('');
     setAiResponse('');
@@ -157,7 +253,7 @@ export default function VoiceChat() {
             <Volume2 size={32} />
             Voice Chat AI
           </h1>
-          <p className="text-purple-100 mt-2">Real-time voice conversation powered by Gemini & TTS</p>
+          <p className="text-purple-100 mt-2">Real-time voice conversation powered by AI</p>
         </div>
 
         {/* Error Banner */}
@@ -188,26 +284,25 @@ export default function VoiceChat() {
           </div>
         )}
 
-        {/* Status Bar */}
-        <div className="p-4 bg-gray-50 border-b border-gray-200">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              {isProcessing && <Loader2 size={16} className="animate-spin text-purple-600" />}
-              <span className="text-sm font-medium text-gray-700">{status}</span>
-            </div>
-            {conversationHistory.length > 0 && (
-              <button
-                onClick={clearHistory}
-                className="text-xs text-gray-500 hover:text-gray-700 px-3 py-1 rounded hover:bg-gray-100 transition-colors"
-              >
-                Clear History
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Main Content */}
         <div className="p-6">
+          {/* Status Bar */}
+          <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg mb-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {isProcessing && <Loader2 size={16} className="animate-spin text-purple-600" />}
+                <span className="text-sm font-medium text-gray-700">{status}</span>
+              </div>
+              {conversationHistory.length > 0 && (
+                <button
+                  onClick={clearHistory}
+                  className="text-xs text-gray-500 hover:text-gray-700 px-3 py-1 rounded hover:bg-gray-100 transition-colors"
+                >
+                  Clear History
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* Microphone Button */}
           <div className="flex justify-center mb-6">
             <button
