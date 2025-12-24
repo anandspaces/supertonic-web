@@ -56,11 +56,23 @@ declare global {
   }
 }
 
+const INTERVIEWER_PROMPT = `You are a professional, friendly interviewer conducting a conversation. Your role is to:
+- Ask thoughtful, engaging questions
+- Listen actively and respond naturally
+- Keep responses concise (1-3 sentences typically)
+- Show genuine interest in the person's answers
+- Follow up on interesting points
+- Maintain a warm, conversational tone
+- Avoid being overly formal or robotic
+
+Start by greeting the person warmly and asking an opening question to get to know them better.`;
+
 // Voice Chat Engine Class
 export class VoiceChatEngine {
   private ttsEngine: TextToSpeech | null = null;
   private voiceStyle: Style | null = null;
   private apiKey: string;
+  private conversationHistory: Array<{ role: string; text: string }> = [];
 
   constructor() {
     this.apiKey = GEMINI_API_KEY;
@@ -162,17 +174,43 @@ export class VoiceChatEngine {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${this.apiKey}`;
     
+    // Build conversation context with interviewer prompt
+    const contents = [
+      {
+        role: 'user',
+        parts: [{ text: INTERVIEWER_PROMPT }]
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Hello! I\'m delighted to chat with you today. What brings you here, and what would you like to talk about?' }]
+      }
+    ];
+
+    // Add conversation history
+    this.conversationHistory.forEach(msg => {
+      contents.push({
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.text }]
+      });
+    });
+
+    // Add current user message
+    contents.push({
+      role: 'user',
+      parts: [{ text }]
+    });
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: text
-          }]
-        }]
+        contents,
+        generationConfig: {
+          temperature: 0.9,
+          maxOutputTokens: 200,
+        }
       })
     });
 
@@ -182,7 +220,186 @@ export class VoiceChatEngine {
     }
 
     const data = await response.json();
-    return data.candidates[0].content.parts[0].text;
+    const responseText = data.candidates[0].content.parts[0].text;
+
+    // Update conversation history
+    this.conversationHistory.push({ role: 'user', text });
+    this.conversationHistory.push({ role: 'assistant', text: responseText });
+
+    // Keep only last 10 messages
+    if (this.conversationHistory.length > 10) {
+      this.conversationHistory = this.conversationHistory.slice(-10);
+    }
+
+    return responseText;
+  }
+
+  async streamGeminiAPI(
+    text: string,
+    onChunk: (chunk: string) => void,
+    onComplete: (fullText: string) => void,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (!this.apiKey) {
+      throw new Error('Gemini API key not found. Please set VITE_GEMINI_API_KEY in your environment variables');
+    }
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?key=${this.apiKey}`;
+    
+    // Build conversation context with interviewer prompt
+    const contents = [
+      {
+        role: 'user',
+        parts: [{ text: INTERVIEWER_PROMPT }]
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Hello! I\'m delighted to chat with you today. What brings you here, and what would you like to talk about?' }]
+      }
+    ];
+
+    // Add conversation history
+    this.conversationHistory.forEach(msg => {
+      contents.push({
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.text }]
+      });
+    });
+
+    // Add current user message
+    contents.push({
+      role: 'user',
+      parts: [{ text }]
+    });
+
+    console.log('[STREAMING] Starting request to Gemini...');
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents,
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 8192,
+        }
+      }),
+      signal
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[STREAMING] Error response:', errorText);
+      throw new Error(`Gemini API request failed: ${response.status} - ${errorText}`);
+    }
+
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+
+    if (!reader) {
+      throw new Error('No reader available');
+    }
+
+    let accumulatedText = '';
+    let chunkCount = 0;
+    let jsonBuffer = '';
+    let braceCount = 0;
+    let inJson = false;
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        console.log('[STREAMING] Stream ended');
+        break;
+      }
+
+      const chunk = decoder.decode(value, { stream: true });
+      
+      // Process character by character to handle multi-line JSON
+      for (let i = 0; i < chunk.length; i++) {
+        const char = chunk[i];
+        
+        if (char === '{') {
+          braceCount++;
+          inJson = true;
+        }
+        
+        if (inJson) {
+          jsonBuffer += char;
+        }
+        
+        if (char === '}') {
+          braceCount--;
+          
+          // When braces are balanced, we have a complete JSON object
+          if (braceCount === 0 && inJson) {
+            try {
+              const data = JSON.parse(jsonBuffer);
+              
+              // Log the complete parsed object for debugging
+              console.log('[STREAMING] Parsed object:', JSON.stringify(data, null, 2));
+              
+              // Try to extract text from various possible locations
+              const candidate = data.candidates?.[0];
+              let chunkText = null;
+              
+              // Check content.parts[].text (normal response)
+              if (candidate?.content?.parts) {
+                for (const part of candidate.content.parts) {
+                  if (part.text) {
+                    chunkText = part.text;
+                    break;
+                  }
+                }
+              }
+              
+              if (chunkText) {
+                chunkCount++;
+                console.log(`[STREAMING] Chunk ${chunkCount}:`, chunkText);
+                accumulatedText += chunkText;
+                onChunk(chunkText);
+              } else {
+                // Check for error or finish reason
+                if (candidate?.finishReason) {
+                  console.log('[STREAMING] Finish reason:', candidate.finishReason);
+                }
+                if (data.promptFeedback) {
+                  console.log('[STREAMING] Prompt feedback:', data.promptFeedback);
+                }
+                if (candidate?.content) {
+                  console.log('[STREAMING] Content structure:', JSON.stringify(candidate.content, null, 2));
+                }
+              }
+            } catch (e) {
+              console.warn('[STREAMING] Failed to parse JSON:', jsonBuffer.substring(0, 100), e);
+            }
+            
+            // Reset for next JSON object
+            jsonBuffer = '';
+            inJson = false;
+          }
+        }
+      }
+    }
+
+    console.log(`[STREAMING] Complete. Total chunks: ${chunkCount}, Total text length: ${accumulatedText.length}`);
+
+    if (!accumulatedText) {
+      throw new Error('No response received from Gemini API. The model may have blocked the content or encountered an error. Try using a different model or adjusting the prompt.');
+    }
+
+    // Update conversation history
+    this.conversationHistory.push({ role: 'user', text });
+    this.conversationHistory.push({ role: 'assistant', text: accumulatedText });
+
+    // Keep only last 10 messages
+    if (this.conversationHistory.length > 10) {
+      this.conversationHistory = this.conversationHistory.slice(-10);
+    }
+
+    onComplete(accumulatedText);
   }
 
   async generateSpeech(text: string): Promise<ArrayBuffer> {
@@ -221,5 +438,13 @@ export class VoiceChatEngine {
 
       audio.play().catch(reject);
     });
+  }
+
+  clearHistory(): void {
+    this.conversationHistory = [];
+  }
+
+  getConversationHistory() {
+    return [...this.conversationHistory];
   }
 }
