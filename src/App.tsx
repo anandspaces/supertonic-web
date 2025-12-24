@@ -1,393 +1,291 @@
 // src/App.tsx
-import React, { useState, useEffect, useRef } from 'react';
-import {
-  loadTextToSpeech,
-  loadVoiceStyle,
-  writeWavFile,
-  TextToSpeech,
-  Style
-} from './lib/helper';
+import { useState, useEffect, useRef } from 'react';
+import { Mic, MicOff, Volume2, Loader2, AlertCircle } from 'lucide-react';
+import { VoiceChatEngine } from './lib/voiceChatEngine';
+import type { SpeechRecognition } from './lib/voiceChatEngine';
 
-interface VoiceStyle {
-  value: string;
-  label: string;
-}
-
-const VOICE_STYLES: VoiceStyle[] = [
-  { value: 'assets/voice_styles/M1.json', label: 'Male 1 (M1)' },
-  { value: 'assets/voice_styles/M2.json', label: 'Male 2 (M2)' },
-  { value: 'assets/voice_styles/F1.json', label: 'Female 1 (F1)' },
-  { value: 'assets/voice_styles/F2.json', label: 'Female 2 (F2)' },
-];
-
-const DEFAULT_VOICE_STYLE_PATH = 'assets/voice_styles/M1.json';
-const DEFAULT_TEXT = 'This morning, I took a walk in the park, and the sound of the birds and the breeze was so pleasant that I stopped for a long time just to listen.';
-
-type StatusType = 'info' | 'success' | 'error';
-
-interface GeneratedAudio {
-  url: string;
+interface Message {
+  role: 'user' | 'assistant';
   text: string;
-  audioDuration: string;
-  generationTime: string;
 }
 
-function App() {
-  // State
-  const [text, setText] = useState<string>(DEFAULT_TEXT);
-  const [voiceStylePath, setVoiceStylePath] = useState<string>(DEFAULT_VOICE_STYLE_PATH);
-  const [totalStep, setTotalStep] = useState<number>(5);
-  const [speed, setSpeed] = useState<number>(1.05);
-  const [statusMessage, setStatusMessage] = useState<string>('ℹ️ <strong>Loading models...</strong> Please wait...');
-  const [statusType, setStatusType] = useState<StatusType>('info');
-  const [backendType, setBackendType] = useState<string>('WebAssembly');
-  const [showBackend, setShowBackend] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string>('');
-  const [isGenerating, setIsGenerating] = useState<boolean>(false);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [generatedAudio, setGeneratedAudio] = useState<GeneratedAudio | null>(null);
-  const [voiceStyleInfo, setVoiceStyleInfo] = useState<string>('Loading...');
+export default function VoiceChat() {
+  const [isListening, setIsListening] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [aiResponse, setAiResponse] = useState('');
+  const [status, setStatus] = useState('Initializing...');
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState<Message[]>([]);
+  const [hasApiKey, setHasApiKey] = useState(false);
+  const [initError, setInitError] = useState('');
+  
+  const engineRef = useRef<VoiceChatEngine | null>(null);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
 
-  // Refs
-  const textToSpeechRef = useRef<TextToSpeech | null>(null);
-  const cfgsRef = useRef<any>(null);
-  const currentStyleRef = useRef<Style | null>(null);
-
-  // Helper functions
-  const getFilenameFromPath = (path: string): string => {
-    return path.split('/').pop() || '';
-  };
-
-  const showStatus = (message: string, type: StatusType = 'info') => {
-    setStatusMessage(message);
-    setStatusType(type);
-  };
-
-  const showError = (message: string) => {
-    setErrorMessage(message);
-  };
-
-  const hideError = () => {
-    setErrorMessage('');
-  };
-
-  // Load style from JSON
-  const loadStyleFromJSON = async (stylePath: string): Promise<Style> => {
-    try {
-      const style = await loadVoiceStyle([stylePath], true);
-      return style;
-    } catch (error) {
-      console.error('Error loading voice style:', error);
-      throw error;
-    }
-  };
-
-  // Initialize models
+  // Initialize Engine
   useEffect(() => {
-    const initializeModels = async () => {
-      try {
-        showStatus('ℹ️ <strong>Loading configuration...</strong>');
-
-        const basePath = 'assets/onnx';
-
-        let executionProvider = 'wasm';
+    const initEngine = async () => {
+      const engine = new VoiceChatEngine();
+      engineRef.current = engine;
+      
+      // Check if API key exists in environment
+      if (engine.hasApiKey()) {
+        setHasApiKey(true);
         try {
-          const result = await loadTextToSpeech(
-            basePath,
-            {
-              executionProviders: ['webgpu'],
-              graphOptimizationLevel: 'all'
-            },
-            (modelName: string, current: number, total: number) => {
-              showStatus(`ℹ️ <strong>Loading ONNX models (${current}/${total}):</strong> ${modelName}...`);
-            }
-          );
-
-          textToSpeechRef.current = result.textToSpeech;
-          cfgsRef.current = result.cfgs;
-
-          executionProvider = 'webgpu';
-          setBackendType('WebGPU');
-        } catch (webgpuError) {
-          console.log('WebGPU not available, falling back to WebAssembly');
-
-          const result = await loadTextToSpeech(
-            basePath,
-            {
-              executionProviders: ['wasm'],
-              graphOptimizationLevel: 'all'
-            },
-            (modelName: string, current: number, total: number) => {
-              showStatus(`ℹ️ <strong>Loading ONNX models (${current}/${total}):</strong> ${modelName}...`);
-            }
-          );
-
-          textToSpeechRef.current = result.textToSpeech;
-          cfgsRef.current = result.cfgs;
+          await engine.initializeTTS(setStatus);
+          setStatus('Ready');
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          setInitError(`TTS initialization failed: ${errorMsg}`);
+          setStatus('TTS initialization failed');
         }
-
-        showStatus('ℹ️ <strong>Loading default voice style...</strong>');
-
-        currentStyleRef.current = await loadStyleFromJSON(DEFAULT_VOICE_STYLE_PATH);
-        setVoiceStyleInfo(`${getFilenameFromPath(DEFAULT_VOICE_STYLE_PATH)} (default)`);
-
-        showStatus(`✅ <strong>Models loaded!</strong> Using ${executionProvider.toUpperCase()}. You can now generate speech.`, 'success');
-        setShowBackend(true);
-        setIsLoading(false);
-      } catch (error: any) {
-        console.error('Error loading models:', error);
-        showStatus(`❌ <strong>Error loading models:</strong> ${error.message}`, 'error');
-        setIsLoading(false);
+      } else {
+        setHasApiKey(false);
+        setInitError('VITE_GEMINI_API_KEY environment variable is not set. Please add it to your .env file.');
+        setStatus('Missing API key');
       }
     };
 
-    initializeModels();
+    initEngine();
   }, []);
 
-  // Handle voice style change
-  const handleVoiceStyleChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const selectedValue = e.target.value;
+  // Start Listening
+  const startListening = () => {
+    if (!engineRef.current) {
+      alert('Engine not initialized');
+      return;
+    }
 
-    if (!selectedValue) return;
+    if (!hasApiKey) {
+      alert('Gemini API key not found in environment variables. Please set VITE_GEMINI_API_KEY.');
+      return;
+    }
 
-    try {
-      setIsLoading(true);
-      showStatus('ℹ️ <strong>Loading voice style...</strong>', 'info');
-
-      currentStyleRef.current = await loadStyleFromJSON(selectedValue);
-      setVoiceStylePath(selectedValue);
-      setVoiceStyleInfo(getFilenameFromPath(selectedValue));
-
-      showStatus(`✅ <strong>Voice style loaded:</strong> ${getFilenameFromPath(selectedValue)}`, 'success');
-      setIsLoading(false);
-    } catch (error: any) {
-      showError(`Error loading voice style: ${error.message}`);
-
-      // Restore default style
-      setVoiceStylePath(DEFAULT_VOICE_STYLE_PATH);
-      try {
-        currentStyleRef.current = await loadStyleFromJSON(DEFAULT_VOICE_STYLE_PATH);
-        setVoiceStyleInfo(`${getFilenameFromPath(DEFAULT_VOICE_STYLE_PATH)} (default)`);
-      } catch (styleError) {
-        console.error('Error restoring default style:', styleError);
+    const recognition = engineRef.current.initializeSpeechRecognition(
+      (text) => setTranscript(text),
+      (error) => {
+        console.error('Speech recognition error:', error);
+        setStatus(`Recognition error: ${error}`);
+        setIsListening(false);
+      },
+      () => {
+        if (isListening) {
+          handleSpeechEnd();
+        }
       }
+    );
 
-      setIsLoading(false);
+    if (!recognition) return;
+
+    recognitionRef.current = recognition;
+    setIsListening(true);
+    setTranscript('');
+    setAiResponse('');
+    setStatus('Listening...');
+    
+    recognition.start();
+  };
+
+  // Stop Listening
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      setIsListening(false);
     }
   };
 
-  // Generate speech
-  const generateSpeech = async () => {
-    const inputText = text.trim();
-    if (!inputText) {
-      showError('Please enter some text to synthesize.');
+  // Handle Speech End
+  const handleSpeechEnd = async () => {
+    if (!transcript.trim()) {
+      setStatus('No speech detected');
+      setIsListening(false);
       return;
     }
 
-    if (!textToSpeechRef.current || !cfgsRef.current) {
-      showError('Models are still loading. Please wait.');
+    if (!engineRef.current) {
+      setStatus('Engine not available');
+      setIsListening(false);
       return;
     }
 
-    if (!currentStyleRef.current) {
-      showError('Voice style is not ready. Please wait.');
-      return;
-    }
-
-    const startTime = Date.now();
+    setIsListening(false);
+    setIsProcessing(true);
+    setStatus('Processing with Gemini...');
 
     try {
-      setIsGenerating(true);
-      hideError();
-      setGeneratedAudio(null);
-
-      showStatus('ℹ️ <strong>Generating speech from text...</strong>');
-      const tic = Date.now();
-
-      const { wav, duration } = await textToSpeechRef.current.call(
-        inputText,
-        currentStyleRef.current,
-        totalStep,
-        speed,
-        0.3,
-        (step: number, total: number) => {
-          showStatus(`ℹ️ <strong>Denoising (${step}/${total})...</strong>`);
-        }
-      );
-
-      const toc = Date.now();
-      console.log(`Text-to-speech synthesis: ${((toc - tic) / 1000).toFixed(2)}s`);
-
-      showStatus('ℹ️ <strong>Creating audio file...</strong>');
-      const wavLen = Math.floor(textToSpeechRef.current.sampleRate * duration[0]);
-      const wavOut = wav.slice(0, wavLen);
-
-      const wavBuffer = writeWavFile(wavOut, textToSpeechRef.current.sampleRate);
-      const blob = new Blob([wavBuffer], { type: 'audio/wav' });
-      const url = URL.createObjectURL(blob);
-
-      const endTime = Date.now();
-      const totalTimeSec = ((endTime - startTime) / 1000).toFixed(2);
-      const audioDurationSec = duration[0].toFixed(2);
-
-      setGeneratedAudio({
-        url,
-        text: inputText,
-        audioDuration: audioDurationSec,
-        generationTime: totalTimeSec,
+      const response = await engineRef.current.callGeminiAPI(transcript);
+      setAiResponse(response);
+      
+      // Keep only last 10 messages to prevent memory issues
+      setConversationHistory(prev => {
+        const updated: Message[] = [...prev, 
+          { role: 'user' as const, text: transcript },
+          { role: 'assistant' as const, text: response }
+        ];
+        return updated.slice(-10);
       });
 
-      showStatus('✅ <strong>Speech synthesis completed successfully!</strong>', 'success');
-    } catch (error: any) {
-      console.error('Error during synthesis:', error);
-      showStatus(`❌ <strong>Error during synthesis:</strong> ${error.message}`, 'error');
-      showError(`Error during synthesis: ${error.message}`);
+      setStatus('Generating speech...');
+      const wavBuffer = await engineRef.current.generateSpeech(response);
+      
+      setStatus('Playing response...');
+      await engineRef.current.playAudio(wavBuffer);
+      
+      setStatus('Ready');
+    } catch (error) {
+      console.error('Processing error:', error);
+      setStatus(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
-      setIsGenerating(false);
+      setIsProcessing(false);
+      setTranscript('');
     }
   };
 
-  const downloadAudio = (url: string, filename: string) => {
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
+  // Clear conversation history
+  const clearHistory = () => {
+    setConversationHistory([]);
+    setTranscript('');
+    setAiResponse('');
   };
 
   return (
-    <div className="container">
-      <h1>🎤 Supertonic</h1>
-      <p className="subtitle">Text-to-Speech with ONNX Runtime Web</p>
-
-      <div className={`status-box ${statusType === 'success' ? 'success' : statusType === 'error' ? 'error' : ''}`}>
-        <div className="status-text-wrapper">
-          <div dangerouslySetInnerHTML={{ __html: statusMessage }} />
+    <div className="min-h-screen w-full bg-linear-to-br from-purple-600 via-blue-600 to-indigo-700 flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl overflow-hidden">
+        {/* Header */}
+        <div className="bg-linear-to-r from-purple-600 to-indigo-600 p-6 text-white">
+          <h1 className="text-3xl font-bold flex items-center gap-3">
+            <Volume2 size={32} />
+            Voice Chat AI
+          </h1>
+          <p className="text-purple-100 mt-2">Real-time voice conversation powered by Gemini & TTS</p>
         </div>
-        <div
-          className={`backend-badge ${showBackend ? 'visible' : ''}`}
-          style={{ background: backendType === 'WebGPU' ? '#4caf50' : '#ff9800' }}
-        >
-          {backendType}
-        </div>
-      </div>
 
-      <div className="main-content">
-        <div className="left-panel">
-          <div className="section">
-            <div className="ref-audio-label">
-              <label htmlFor="voiceStyleSelect">Voice Style: </label>
-              <span className="ref-audio-info">{voiceStyleInfo}</span>
+        {/* Error Banner */}
+        {!hasApiKey && (
+          <div className="p-6 bg-red-50 border-b border-red-200">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="text-red-600 shrink-0 mt-0.5" size={20} />
+              <div>
+                <p className="font-semibold text-red-900 mb-1">Configuration Error</p>
+                <p className="text-sm text-red-800 mb-2">{initError}</p>
+                <div className="text-xs text-red-700 bg-red-100 p-3 rounded-lg font-mono">
+                  <p className="mb-1">Create a <span className="font-bold">.env</span> file in your project root:</p>
+                  <p className="text-red-900">VITE_GEMINI_API_KEY=your_key_here</p>
+                </div>
+                <p className="text-xs text-red-700 mt-2">
+                  Get your API key from{' '}
+                  <a
+                    href="https://aistudio.google.com/app/apikey"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline font-semibold"
+                  >
+                    Google AI Studio
+                  </a>
+                </p>
+              </div>
             </div>
-            <select
-              id="voiceStyleSelect"
-              value={voiceStylePath}
-              onChange={handleVoiceStyleChange}
-              disabled={isLoading}
+          </div>
+        )}
+
+        {/* Status Bar */}
+        <div className="p-4 bg-gray-50 border-b border-gray-200">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {isProcessing && <Loader2 size={16} className="animate-spin text-purple-600" />}
+              <span className="text-sm font-medium text-gray-700">{status}</span>
+            </div>
+            {conversationHistory.length > 0 && (
+              <button
+                onClick={clearHistory}
+                className="text-xs text-gray-500 hover:text-gray-700 px-3 py-1 rounded hover:bg-gray-100 transition-colors"
+              >
+                Clear History
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Main Content */}
+        <div className="p-6">
+          {/* Microphone Button */}
+          <div className="flex justify-center mb-6">
+            <button
+              onClick={isListening ? stopListening : startListening}
+              disabled={isProcessing || !hasApiKey}
+              className={`
+                relative w-32 h-32 rounded-full flex items-center justify-center
+                transition-all duration-300 transform hover:scale-105
+                ${isListening 
+                  ? 'bg-red-500 hover:bg-red-600 animate-pulse' 
+                  : 'bg-linear-to-br from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700'
+                }
+                ${isProcessing || !hasApiKey ? 'opacity-50 cursor-not-allowed' : 'shadow-xl'}
+                disabled:transform-none
+              `}
             >
-              {VOICE_STYLES.map((style) => (
-                <option key={style.value} value={style.value}>
-                  {style.label}
-                </option>
-              ))}
-            </select>
+              {isListening ? (
+                <MicOff size={48} className="text-white" />
+              ) : (
+                <Mic size={48} className="text-white" />
+              )}
+              {isListening && (
+                <span className="absolute -bottom-8 text-sm font-semibold text-red-600">
+                  Listening...
+                </span>
+              )}
+            </button>
           </div>
 
-          <div className="section">
-            <label htmlFor="text">Text to Synthesize:</label>
-            <textarea
-              id="text"
-              placeholder="Enter the text you want to convert to speech..."
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-            />
-          </div>
-
-          <div className="params-grid">
-            <div className="section">
-              <label htmlFor="totalStep">Total Steps (higher = better quality):</label>
-              <input
-                type="number"
-                id="totalStep"
-                value={totalStep}
-                onChange={(e) => setTotalStep(Number(e.target.value))}
-                min="1"
-                max="50"
-              />
+          {/* Current Transcript */}
+          {transcript && (
+            <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+              <p className="text-xs font-semibold text-blue-600 mb-1">You said:</p>
+              <p className="text-gray-800">{transcript}</p>
             </div>
-
-            <div className="section">
-              <label htmlFor="speed">Speed (0.9-1.5 recommended):</label>
-              <input
-                type="number"
-                id="speed"
-                value={speed}
-                onChange={(e) => setSpeed(Number(e.target.value))}
-                min="0.5"
-                max="2.0"
-                step="0.05"
-              />
-            </div>
-          </div>
-
-          <button onClick={generateSpeech} disabled={isLoading || isGenerating}>
-            Generate Speech
-          </button>
-
-          {errorMessage && (
-            <div className="error active">{errorMessage}</div>
           )}
-        </div>
 
-        <div className="right-panel">
-          <div className="results">
-            {!generatedAudio && !isGenerating && (
-              <div className="results-placeholder">
-                <div className="results-placeholder-icon">🎤</div>
-                <p>Generated speech will appear here</p>
-              </div>
-            )}
+          {/* Current AI Response */}
+          {aiResponse && (
+            <div className="mb-4 p-4 bg-purple-50 rounded-lg border border-purple-200">
+              <p className="text-xs font-semibold text-purple-600 mb-1">AI Response:</p>
+              <p className="text-gray-800">{aiResponse}</p>
+            </div>
+          )}
 
-            {isGenerating && (
-              <div className="results-placeholder generating">
-                <div className="results-placeholder-icon">⏳</div>
-                <p>Generating speech...</p>
-              </div>
-            )}
-
-            {generatedAudio && (
-              <div className="result-item">
-                <div className="result-text-container">
-                  <div className="result-text-label">Input Text</div>
-                  <div className="result-text">{generatedAudio.text}</div>
-                </div>
-                <div className="result-info">
-                  <div className="info-item">
-                    <span>📊 Audio Length</span>
-                    <strong>{generatedAudio.audioDuration}s</strong>
+          {/* Conversation History */}
+          {conversationHistory.length > 0 && (
+            <div className="mt-6">
+              <h3 className="text-sm font-semibold text-gray-700 mb-3">Conversation History</h3>
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {conversationHistory.map((msg, idx) => (
+                  <div
+                    key={idx}
+                    className={`p-3 rounded-lg ${
+                      msg.role === 'user'
+                        ? 'bg-blue-50 border border-blue-200'
+                        : 'bg-purple-50 border border-purple-200'
+                    }`}
+                  >
+                    <p className="text-xs font-semibold mb-1 text-gray-600">
+                      {msg.role === 'user' ? '👤 You' : '🤖 AI'}
+                    </p>
+                    <p className="text-sm text-gray-800">{msg.text}</p>
                   </div>
-                  <div className="info-item">
-                    <span>⏱️ Generation Time</span>
-                    <strong>{generatedAudio.generationTime}s</strong>
-                  </div>
-                </div>
-                <div className="result-player">
-                  <audio controls>
-                    <source src={generatedAudio.url} type="audio/wav" />
-                  </audio>
-                </div>
-                <div className="result-actions">
-                  <button onClick={() => downloadAudio(generatedAudio.url, 'synthesized_speech.wav')}>
-                    <span>⬇️</span>
-                    <span>Download WAV</span>
-                  </button>
-                </div>
+                ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
+
+          {/* Instructions */}
+          {hasApiKey && conversationHistory.length === 0 && !transcript && !aiResponse && (
+            <div className="text-center text-gray-500 mt-8">
+              <p className="mb-2">Click the microphone to start talking</p>
+              <p className="text-sm">The AI will respond with voice automatically</p>
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
-
-export default App;
