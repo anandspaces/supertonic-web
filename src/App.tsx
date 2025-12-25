@@ -321,17 +321,6 @@ export default function VoiceChat() {
               <div>
                 <p className="font-semibold text-red-900 mb-1">Configuration Error</p>
                 <p className="text-sm text-red-800 mb-2">{initError}</p>
-                <p className="text-xs text-red-700 mt-2">
-                  Get your API key from{' '}
-                  <a
-                    href="https://aistudio.google.com/app/apikey"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline font-semibold"
-                  >
-                    Google AI Studio
-                  </a>
-                </p>
               </div>
             </div>
           </div>
