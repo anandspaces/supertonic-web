@@ -64,7 +64,7 @@ export default function VoiceChat() {
       } else {
         log('API key not found', 'error');
         setHasApiKey(false);
-        setInitError('VITE_GEMINI_API_KEY environment variable is not set. Please add it to your .env file.');
+        setInitError('Environment variable is not set.');
         setStatus('Missing API key');
       }
     };
@@ -120,7 +120,7 @@ export default function VoiceChat() {
 
     if (!hasApiKey) {
       log('API key missing, cannot start', 'error');
-      alert('Gemini API key not found in environment variables. Please set VITE_GEMINI_API_KEY.');
+      alert('API key is missing!');
       return;
     }
 
@@ -219,7 +219,7 @@ export default function VoiceChat() {
 
     setIsListening(false);
     setIsProcessing(true);
-    setStatus('Processing with Gemini...');
+    setStatus('Processing...');
     setAiResponse('');
     log('Starting AI processing with streaming...');
 
@@ -321,10 +321,6 @@ export default function VoiceChat() {
               <div>
                 <p className="font-semibold text-red-900 mb-1">Configuration Error</p>
                 <p className="text-sm text-red-800 mb-2">{initError}</p>
-                <div className="text-xs text-red-700 bg-red-100 p-3 rounded-lg font-mono">
-                  <p className="mb-1">Create a <span className="font-bold">.env</span> file in your project root:</p>
-                  <p className="text-red-900">VITE_GEMINI_API_KEY=your_key_here</p>
-                </div>
                 <p className="text-xs text-red-700 mt-2">
                   Get your API key from{' '}
                   <a

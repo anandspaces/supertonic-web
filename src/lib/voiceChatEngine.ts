@@ -169,7 +169,7 @@ export class VoiceChatEngine {
 
   async callGeminiAPI(text: string): Promise<string> {
     if (!this.apiKey) {
-      throw new Error('Gemini API key not found. Please set VITE_GEMINI_API_KEY in your environment variables');
+      throw new Error('Gemini API key not found. Please set environment variables');
     }
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${this.apiKey}`;
@@ -241,7 +241,7 @@ export class VoiceChatEngine {
     signal?: AbortSignal
   ): Promise<void> {
     if (!this.apiKey) {
-      throw new Error('Gemini API key not found. Please set VITE_GEMINI_API_KEY in your environment variables');
+      throw new Error('Gemini API key not found. Please set environment variables');
     }
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?key=${this.apiKey}`;
