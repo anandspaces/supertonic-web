@@ -113,6 +113,7 @@ export default function VoiceChat() {
   };
 
   // Start Listening
+  // Start Listening with real-time processing
   const startListening = () => {
     log('=== START LISTENING CLICKED ===');
     
@@ -137,21 +138,38 @@ export default function VoiceChat() {
     log('Initializing speech recognition...');
     finalTranscriptRef.current = '';
     shouldProcessRef.current = true;
+    let silenceTimeout: number | null = null;
+    let lastTranscriptTime = Date.now();
     
     const recognition = engineRef.current.initializeSpeechRecognition(
       (text) => {
         log(`Recognition result: "${text.substring(0, 50)}..."`);
         setTranscript(text);
+        lastTranscriptTime = Date.now();
         
         if (text.trim()) {
           finalTranscriptRef.current = text.trim();
           log(`Updated finalTranscriptRef: "${finalTranscriptRef.current.substring(0, 50)}..."`);
+          
+          // Clear existing timeout
+          if (silenceTimeout) {
+            clearTimeout(silenceTimeout);
+          }
+          
+          // Set new timeout for silence detection (1.5 seconds of silence triggers processing)
+          silenceTimeout = setTimeout(() => {
+            if (finalTranscriptRef.current && Date.now() - lastTranscriptTime >= 1500) {
+              log('Silence detected, auto-processing...');
+              stopListening();
+            }
+          }, 1500);
         }
       },
       (error) => {
         log(`Speech recognition error: ${error}`, 'error');
         setStatus(`Recognition error: ${error}`);
         setIsListening(false);
+        if (silenceTimeout) clearTimeout(silenceTimeout);
         
         if (error === 'not-allowed') {
           alert('Microphone access denied. Please allow microphone access.');
@@ -159,6 +177,7 @@ export default function VoiceChat() {
       },
       () => {
         log('Recognition ended event triggered');
+        if (silenceTimeout) clearTimeout(silenceTimeout);
         log(`shouldProcessRef: ${shouldProcessRef.current}`);
         log(`Final transcript at end: "${finalTranscriptRef.current.substring(0, 50)}..."`);
         
