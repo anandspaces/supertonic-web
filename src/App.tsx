@@ -19,6 +19,7 @@ export default function VoiceChat() {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [initError, setInitError] = useState('');
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isTtsReady, setIsTtsReady] = useState(false);
   
   const engineRef = useRef<VoiceChatEngine | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -55,17 +56,20 @@ export default function VoiceChat() {
           });
           log(`TTS initialized successfully: ${ttsStatus}`);
           setStatus('Ready');
+          setIsTtsReady(true);
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : 'Unknown error';
           log(`TTS initialization failed: ${errorMsg}`, 'error');
           setInitError(`TTS initialization failed: ${errorMsg}`);
           setStatus('TTS initialization failed');
+          setIsTtsReady(false);
         }
       } else {
         log('API key not found', 'error');
         setHasApiKey(false);
         setInitError('Environment variable is not set.');
         setStatus('Missing API key');
+        setIsTtsReady(false);
       }
     };
 
@@ -121,6 +125,12 @@ export default function VoiceChat() {
     if (!hasApiKey) {
       log('API key missing, cannot start', 'error');
       alert('API key is missing!');
+      return;
+    }
+
+    if (!isTtsReady) {
+      log('TTS not ready, cannot start', 'error');
+      alert('TTS models are still loading. Please wait.');
       return;
     }
 
@@ -331,7 +341,7 @@ export default function VoiceChat() {
           <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg mb-6">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                {(isProcessing || isSpeaking) && <Loader2 size={16} className="animate-spin text-purple-600" />}
+                {(isProcessing || isSpeaking || !isTtsReady) && <Loader2 size={16} className="animate-spin text-purple-600" />}
                 <span className="text-sm font-medium text-gray-700">
                   {status}
                   {isSpeaking && ' 🔊'}
@@ -352,7 +362,7 @@ export default function VoiceChat() {
           <div className="flex justify-center mb-6">
             <button
               onClick={isListening ? stopListening : startListening}
-              disabled={isProcessing || !hasApiKey}
+              disabled={isProcessing || !hasApiKey || !isTtsReady}
               className={`
                 relative w-32 h-32 rounded-full flex items-center justify-center
                 transition-all duration-300 transform hover:scale-105
@@ -360,7 +370,7 @@ export default function VoiceChat() {
                   ? 'bg-red-500 hover:bg-red-600 animate-pulse' 
                   : 'bg-linear-to-br from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700'
                 }
-                ${isProcessing || !hasApiKey ? 'opacity-50 cursor-not-allowed' : 'shadow-xl'}
+                ${isProcessing || !hasApiKey || !isTtsReady ? 'opacity-50 cursor-not-allowed' : 'shadow-xl'}
                 disabled:transform-none
               `}
             >
@@ -420,8 +430,14 @@ export default function VoiceChat() {
           {/* Instructions */}
           {hasApiKey && conversationHistory.length === 0 && !transcript && !aiResponse && (
             <div className="text-center text-gray-500 mt-8">
-              <p className="mb-2">Click the microphone to start talking</p>
-              <p className="text-sm">The AI will respond with voice automatically</p>
+              {isTtsReady ? (
+                <>
+                  <p className="mb-2">Click the microphone to start talking</p>
+                  <p className="text-sm">The AI will respond with voice automatically</p>
+                </>
+              ) : (
+                <p className="mb-2">Loading TTS models, please wait...</p>
+              )}
             </div>
           )}
         </div>
